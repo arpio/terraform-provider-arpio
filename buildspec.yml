@@ -1,0 +1,116 @@
+# AWS CodeBuild spec
+#
+# The project can be built normally from a clean checkout of the repo (which
+# is how the hosted AWS CodeBuild service will do it), or locally on a computer
+# of your choice.
+#
+#   GITHUB_TOKEN (optional)
+#       Github Personal Access Token to use to publish new releases.
+#
+#       Always set this from an SSM secret parameter or secrets manager secret!
+#
+#   GPG_FINGERPRINT (optional)
+#       Hexadecimal fingerprint of the GPG key used to sign releases (stored in
+#       GPG_PRIVATE_KEY_PARAM).
+#
+#   GPG_PRIVATE_KEY (optional)
+#       ASCII-armored GPG private key used to sign releases.  This private key
+#       must not be protected by a passphrase.
+#
+#       Always set this from an SSM secret parameter or secrets manager secret!
+#
+#   RELEASES_BUCKET (optional)
+#       Set to the name of the S3 bucket where release binaries should be copied after
+#       a successful build.
+#
+#   SKIP_RELEASE
+#       If set to any value, the release process is skipped.
+#
+#   TEST_TARGET
+#       Name of the test make target to run.
+
+version: 0.2
+
+env:
+  # Use bash as the shell for convenience.
+  shell: bash
+phases:
+  install:
+    # We want go >= 1.16 so we can "go install" @ a specific version.  As of 2021-09-07,
+    # the Amazon Linux 2 CodeBuild 3.0 images don't support new golang runtimes, so this
+    # build requires the Ubuntu CodeBuild 5.0 images (which seem to be kept more up-to-date).
+    #
+    # https://github.com/aws/aws-codebuild-docker-images/blob/master/al2/x86_64/standard/3.0/runtimes.yml
+    # https://github.com/aws/aws-codebuild-docker-images/blob/master/ubuntu/standard/5.0/runtimes.yml
+    runtime-versions:
+      python: 3.8
+      golang: 1.16
+    commands:
+      # `go install github.com/goreleaser/goreleaser@latest` works but is much slower than using the deb
+      - wget -q -O /tmp/goreleaser.deb https://github.com/goreleaser/goreleaser/releases/download/v0.177.0/goreleaser_amd64.deb
+      - dpkg -i /tmp/goreleaser.deb
+      # We need the provider build utils to publish the provider mirror
+      - mkdir /tmp/terraform-provider-build-utils
+      - wget -q -O /tmp/terraform-provider-build-utils.tar.gz https://github.com/arpio/terraform-provider-build-utils/archive/refs/tags/v1.0.4.tar.gz
+      - tar -x -C /tmp/terraform-provider-build-utils --strip-components 1 -f /tmp/terraform-provider-build-utils.tar.gz
+      # The provider build utils need dirhasher
+      - go install github.com/arpio/dirhasher@v1.0.1
+      # Get our module's dependencies
+      - go get
+  pre_build:
+    commands:
+      # Uncomment to print all environment variables for troubleshooting
+      # - printenv
+      # Import the private key for signing
+      - if [[ "$GPG_FINGERPRINT" && "$GPG_PRIVATE_KEY" ]] ; then echo "$GPG_PRIVATE_KEY" | gpg --import ; fi
+  build:
+    commands:
+      # Run tests
+      - make $TEST_TARGET
+  post_build:
+    commands:
+      # Release
+      - |
+        set -e
+        DO_RELEASE=1
+
+        if [[ "$SKIP_RELEASE" ]] ; then
+          echo "Skip release: SKIP_RELEASE is set"
+          DO_RELEASE=0
+        fi
+        if [[ "$CODEBUILD_BUILD_SUCCEEDING" != "1" ]] ; then
+          echo "Skip release: build failed"
+          DO_RELEASE=0
+        fi
+        if [[ "$CODEBUILD_WEBHOOK_EVENT" != "PUSH" ]] ; then
+          echo "Skip release: no PUSH webhook event"
+          DO_RELEASE=0
+        fi
+        if [[ "$CODEBUILD_WEBHOOK_TRIGGER" != tag/v* ]] ; then
+          echo "Skip release: webhook trigger doesn't match tag/v*"
+          DO_RELEASE=0
+        fi
+
+        if [[ "$DO_RELEASE" == "1" ]] ; then
+          # Builds and publishes a new release to Github for the current tag
+          goreleaser release --rm-dist
+
+          if [[ "$RELEASES_BUCKET" ]] ; then
+            # Prepare a directory with the files we'll copy to the release bucket
+            mkdir /tmp/release
+            cp dist/*.zip dist/*SUMS dist/*.sig /tmp/release
+
+            P_NAMESPACE=arpio
+            P_TYPE=terraform-provider-arpio
+            # Get the number after the "v" prefix
+            P_VERSION=$(git describe --tags | cut -c 2-)
+
+            # Sync files to the releases bucket
+            aws s3 sync --quiet /tmp/release/ "s3://$RELEASES_BUCKET/terraform-providers/$P_TYPE/$P_VERSION/"
+
+            # Include the version we just released in the provider mirror
+            /tmp/terraform-provider-build-utils/mirror-provider.py \
+              "$RELEASES_BUCKET/terraform-providers/$P_TYPE" \
+              "$RELEASES_BUCKET/terraform-providers-mirror/registry.terraform.io/$P_NAMESPACE/$P_TYPE/"
+          fi
+        fi
