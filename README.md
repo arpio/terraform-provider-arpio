@@ -1,6 +1,6 @@
 # Terraform Provider Arpio
 
-TODO
+Terraform provider for Arpio.
 
 ## Build provider
 
