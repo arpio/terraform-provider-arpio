@@ -107,10 +107,5 @@ phases:
 
             # Sync files to the releases bucket
             aws s3 sync --quiet /tmp/release/ "s3://$RELEASES_BUCKET/terraform-providers/$P_TYPE/$P_VERSION/"
-
-            # Include the version we just released in the provider mirror
-            /tmp/terraform-provider-build-utils/mirror-provider.py \
-              "$RELEASES_BUCKET/terraform-providers/$P_TYPE" \
-              "$RELEASES_BUCKET/terraform-providers-mirror/registry.terraform.io/$P_NAMESPACE/$P_TYPE/"
           fi
         fi
