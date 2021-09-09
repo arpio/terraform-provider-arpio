@@ -55,8 +55,8 @@ phases:
       - tar -x -C /tmp/terraform-provider-build-utils --strip-components 1 -f /tmp/terraform-provider-build-utils.tar.gz
       # The provider build utils need dirhasher
       - go install github.com/arpio/dirhasher@v1.0.1
-      # Download our module dependencies
-      - go mod download
+      # Get our module dependencies
+      - go get
   pre_build:
     commands:
       # Uncomment to print all environment variables for troubleshooting
